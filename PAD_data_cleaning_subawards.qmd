@@ -11,8 +11,8 @@ library(readxl)
 
 ```{r}
 # Load Data
-Assistance_Subawards <- read_csv("./data/Subawards/Assistance_Subawards_2024-09-12_H02M24S51_1(in).csv") 
-Contracts_Subawards <- read_csv("./data/Subawards/Contracts_Subawards_2024-09-12_H02M20S09_1(in).csv")
+Assistance_Subawards <- read_csv("./data/Assistance_Subawards_2024-09-12_H02M24S51_1(in).csv") 
+Contracts_Subawards <- read_csv("./data/Contracts_Subawards_2024-09-12_H02M20S09_1(in).csv")
 ```
 
 ```{r}
