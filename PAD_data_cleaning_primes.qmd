@@ -1,0 +1,271 @@
+---
+title: "PAD_data_cleaning_code"
+format: html
+editor: visual
+---
+
+```{r}
+# Library required packages
+library(tidyverse)
+library(readxl)
+```
+
+# Unredactions
+
+The following section cross-references usaspending, IATI, and fa.gov data to reduce the redaction rate in foreign assistance data
+
+## IATI Data
+
+Loads in IATI data for 2016 - 2022 for Colombia, Guatemala and Mexico
+
+## FA.gov Data
+
+Load in fa.gov dataset and get a list of redacted implementers
+
+```{r}
+# Load data
+fa_data <- read_csv("./data/fa.gov_8-15-2024.csv") %>%
+  filter(
+    `Fiscal Year` %in% c(2016:2022),
+    `Managing Agency ID` == 1,
+    `Aid Type Group Name` == "Project-Type"
+  )
+
+# Get a list of redacted implementers
+
+# List of implementer tags that signify redactions
+redacted_imps <- c(
+  "NGO - International Redacted", 
+  "Enterprise - Non United States Redacted",
+  "Enterprise - Non United States Other",
+  "NGO - Non United States Redacted",
+  "Multilateral Organizations - Redacted",
+  "Church and Faith Based - Non United States Redacted", 
+  "Unspecified Vendors - Colombia",
+  "Unspecified Vendors - Mexico", 
+  "Unspecified Vendors - Peru",
+  "NGO - Non United States Other",
+  "Unspecified Vendors - El Salvador",
+  "Church and Faith Based - United States Redacted",
+  "Enterprise - United States Redacted",
+  "Multilateral - United Nations Organization Redacted",
+  "NGO - United States Redacted",
+  "University/Research Institute - United States Redacted", 
+  "Multilateral - United Nations Organization Redacted"
+)
+
+# Get list of redacted projects fa.gov
+redacted_df <- fa_data %>%
+  filter(`Implementing Partner Name` %in% redacted_imps) 
+```
+
+## USASpending
+
+Cross-references usaspending data with fa.gov
+
+```{r}
+# Load usaspending contracts and assistance for USAID 
+contracts <- read_csv("./data/Contracts_PrimeAwardSummaries_2024-08-18_H21M40S21_1.csv")
+assistance <- read.csv("./data/Assistance_PrimeAwardSummaries_2024-08-18_H21M40S38_1.csv")
+contracts_id <- contracts %>% select(award_id_piid, recipient_name, recipient_parent_name, recipient_country_code)
+assistance_id <- assistance %>% select(award_id_fain, recipient_name, recipient_parent_name, recipient_country_code) 
+# Rename id column to bind data
+names(assistance_id)[names(assistance_id) == 'award_id_fain'] <- 'award_id_piid'
+project_ids <- rbind(contracts_id, assistance_id)
+```
+
+Join USASpending and redacted fa.gov data
+
+```{r}
+redacted_projs_final <- redacted_df %>%
+  # Standardize ID's for join 
+  mutate(`Activity Project Number` = str_remove_all(
+    `Activity Project Number`,
+    "-"
+  )) %>%
+  select(`Country Code`, `Implementing Partner Category Name`, `Implementing Partner Sub-category ID`, `Activity Name`, `Activity Description`, `Activity Project Number`) %>%
+left_join(project_ids, 
+          by = join_by("Activity Project Number" == "award_id_piid"))
+```
+
+This dataframe of redacted projects (redacted_projs_final) is further cleaned manually since some projects are not correctly tagged in USASpending as USAID projects
+
+```{r}
+# Load dataset with additional manual cleaning
+usaspending_unredactions <- read_excel("./data/usaspending_unredactions.xlsx") %>%
+  select(`Activity Project Number`, recipient_name, recipient_country_code) %>%
+  group_by(`Activity Project Number`) %>%
+  summarize(
+    recipient_name = max(recipient_name),
+    recipient_country_code = max(recipient_country_code)
+  ) %>%
+  filter(`recipient_name` != "NA")
+```
+
+```{r}
+# Join with fa.gov data
+unredacted_fa_data <- fa_data %>%
+  # Standardize IDs for join
+  mutate(`Activity Project Number` = str_remove_all(
+      `Activity Project Number`,
+      "-"
+  )) %>%
+  left_join(
+    usaspending_unredactions,
+    by = join_by(`Activity Project Number`)
+  ) %>% 
+  mutate(
+    `Implementing Partner Name` = case_when(
+      !is.na(recipient_name) ~ recipient_name,
+      .default =  `Implementing Partner Name`
+    )
+  ) 
+```
+
+Check redaction rate
+
+```{r}
+# Base redaction rate
+fa_data %>%
+  filter(`Implementing Partner Name` %in% redacted_imps) -> test
+
+sum(test$`Current Dollar Amount`) / sum(fa_data$`Current Dollar Amount`)
+
+# Redaction rate after cross referencing with USASpending
+unredacted_fa_data %>%
+  filter(`Implementing Partner Name` %in% redacted_imps) -> test
+
+sum(test$`Current Dollar Amount`) / sum(fa_data$`Current Dollar Amount`)
+```
+
+## IATI Data
+
+```{r}
+# Load in IATI DATA
+iati_df <- read_excel("./data/iati_9_11_co_guat_mex.xlsx") %>%
+  # Make years tidy
+  pivot_longer(cols = c(10:16), names_to = "year") %>%
+  # Filter awards with value = 0
+  filter(value != 0) %>%
+  # Clean years column
+  mutate(year = str_replace(year, "Value \\(USD\\)", "")) %>%
+  mutate(year = str_replace_all(year, "\\(", "")) %>%
+  mutate(year = as.numeric(str_replace_all(year, "\\)", ""))) %>%
+  # Filter to projects
+  filter(`Aid Type` %in% c("C01 - Project-type interventions", "A02 - Sector budget support"))
+```
+
+```{r}
+# Clean fa.gov data
+
+duplicates = c(
+  "BANCO DE LAS MICROFINANZAS BANCAMIA S A" = "Bancama",
+  "LA CORPORACION MISION DE OBSERVACION ELECTORAL MOE" = "Misin de Observacin Electoral (Colombia)", 
+  "SECRETARIADO NACIONAL DE PASTORAL SOCIAL-CARITAS COLOMBIANA" = "Caritas Colombiana", 
+  "FUNDACION PARA LA IMPLEMENTACION, DISENO, EVALUACION Y ANALISIS DE POLITICAS PUBLICAS, A.C." = "Fundacion IDEA",
+  "MEXICO EVALUA. CENTRO DE ANALISIS DE POLITICAS PUBLICAS, A.C." = "Mexico Evalua Centro de Analisis de Politicas Publicas A.C.",
+  "ABT GLOBAL LLC" = "Abt Associates, Inc.",
+  "ACDI/VOCA" = "Agriculture Cooperative Development International/Volunteers in Overseas Cooperative Assistance",
+  "AMERICARES FOUNDATION, INC." = "Americares",
+  "ARCANGELES FUNDACION PARA LA REHABILITACION INTEGRAL" = "Arcangeles",
+  "BANYAN GLOBAL INC." = "Banyan Global",
+  "COLLEGE OF WILLIAM AND MARY" = "College of William & Mary",
+  "CHEMONICS INTERNATIONAL, INC." = "Chemonics International, Inc.",
+  "DAI GLOBAL LLC" = "Development Alternatives, Inc.",
+  "DEXIS INTERACTIVE LLC" = "Dexis Consulting Group",
+  "ENVIRONMENTAL INCENTIVES, LLC" = "Environmental Incentives, LLC",
+  "GLOBAL COMMUNITIES, INC." = "Global Communities",
+  "HEARTLAND ALLIANCE INTERNATIONAL, LLC" = "Heartland Alliance",
+  "JHPIEGO CORP" = "Jhpiego Corporation",
+  "MERCY CORPS" = "Mercy Corps",
+  "MIYAMOTO INTERNATIONAL INC" = "Miyamoto Relief",
+  "PAN AMERICAN DEVELOPMENT FOUNDATION, INC." = "Pan-American Development Foundation",
+  "PRONATURA SUR, A.C." = "Pronatura Mexico", 
+  "SAVE THE CHILDREN FEDERATION, INC." = "Save the Children Federation, Inc.", 
+  "SOCIAL IMPACT INC" = "Social Impact, Inc.", 
+  "SSG-ADVISORS LLC" = "SSG Advisors, LLC", 
+  "UNIVERSITY OF NORTH CAROLINA AT CHAPEL HILL" = "University of North Carolina, Chapel Hill",
+  "WORLD VISION INC." = "World Vision"
+)
+
+unredacted_fa_data <- unredacted_fa_data %>%
+  mutate(`Implementing Partner Name` = ifelse(
+    `Implementing Partner Name` %in% names(duplicates),
+    duplicates[`Implementing Partner Name`], # IF duplicate
+    `Implementing Partner Name` # IF not
+  ))
+```
+
+```{r}
+# Clean IATI IDS
+iati_df %>%
+  mutate(
+    `IATI Identifier` = str_replace(`IATI Identifier`, "US-GOV-1-", "")
+    ) %>%
+  mutate(
+    `IATI Identifier` = str_replace_all(`IATI Identifier`, "-", "")
+  ) -> iati_ids_cleaned
+
+# Group FA data for join
+grouped_fa_data <- unredacted_fa_data %>%
+  group_by(`Activity Project Number`) %>%
+  summarize(
+    imp_name = max(`Implementing Partner Name`)
+  )
+
+# join the df
+fa_iati_joined <-left_join(iati_ids_cleaned, grouped_fa_data, by = join_by("IATI Identifier" == "Activity Project Number"))
+```
+
+```{r}
+# check redaction rate
+
+# redacted imps list 
+redacted_list_iati <- c(
+  "Unspecified Vendors - Colombia", 
+  "USAID redacted this field in accordance with the exceptions outlined in the Foreign Aid Transparency and Accountability Act of 2016.",
+  "USAID redacted this field in accordance with the exceptions outlined in the Foreign Aid Transparency and Accountability Act of 2016. [nan]",
+  "Unspecified Vendors - Guatemala"
+)
+
+# IATI Redaction Rate
+iati_df %>%
+  filter(`Receiver Organisation` %in% redacted_list_iati) -> iati_redacted
+sum(iati_redacted$value) / sum(iati_df$value)
+# The reaction rate of IATI data is 0.03108498
+
+# joined redaction rate
+fa_iati_joined %>%
+  filter(`Receiver Organisation` %in% redacted_list_iati) %>%
+  filter(is.na(imp_name)) -> redacted
+sum(redacted$value) / sum(fa_iati_joined$value)
+# The reaction rate of IATI data joined with fa.gov is 0.00315654
+```
+
+## Join Cleaned Data With Coding
+
+```{r}
+org_coding <- read_xlsx("./data/org_codings.xlsx") %>%
+  select(-Note)
+
+# Org Type Coding - Generates sheet: Org. Type Coding COL-GUATE-MX
+org_type_coding_df <- fa_iati_joined %>%
+  mutate(redacted_indicator = case_when(
+    `Receiver Organisation` %in% redacted_list_iati & !is.na(`imp_name`) ~ "T",
+    .default = "F"
+  )) %>%
+  mutate(`Receiver Organisation` = case_when(
+    `Receiver Organisation` %in% redacted_list_iati & !is.na(`imp_name`) ~ `imp_name`,
+    .default = `Receiver Organisation`
+  )) %>% ## appends unredactions if available and corrects names if needed
+  left_join(org_coding, by = join_by(`Receiver Organisation` == `imp_name`)) %>%
+  mutate(`Receiver Organisation` = case_when(
+     !is.na(`Correct_name`) ~ `Correct_name`,
+     TRUE ~ `Receiver Organisation`
+  )) %>%
+  select(-imp_name, -`Correct_name`) 
+
+# Direct Imp Coding Df
+direct_imp_coding <- org_type_coding_df %>%
+  select(-Code, -Organization_Type, -redacted_indicator)
+```

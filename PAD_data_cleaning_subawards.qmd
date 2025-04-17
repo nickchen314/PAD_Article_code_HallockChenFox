@@ -1,0 +1,117 @@
+---
+title: "PAD_data_cleaning_subawards"
+format: html
+editor: visual
+---
+
+```{r}
+library(tidyverse)
+library(readxl)
+```
+
+```{r}
+# Load Data
+Assistance_Subawards <- read_csv("./data/Subawards/Assistance_Subawards_2024-09-12_H02M24S51_1(in).csv") 
+Contracts_Subawards <- read_csv("./data/Subawards/Contracts_Subawards_2024-09-12_H02M20S09_1(in).csv")
+```
+
+```{r}
+# Select needed columns, bind data
+Contracts_Subawards %>%
+  select(prime_award_unique_key, prime_award_piid, prime_award_amount, prime_award_period_of_performance_start_date, prime_award_period_of_performance_current_end_date, prime_award_funding_agency_code, prime_awardee_uei, prime_awardee_name, prime_awardee_country_code, prime_awardee_business_types, prime_award_primary_place_of_performance_country_code, prime_award_project_title, subaward_type, subaward_amount, subaward_action_date_fiscal_year, subawardee_uei, subawardee_name, subawardee_country_code, subawardee_business_types, subaward_primary_place_of_performance_country_code, subaward_action_date, prime_award_base_action_date_fiscal_year) -> cont
+
+Assistance_Subawards %>%
+  select(prime_award_unique_key, prime_award_fain, prime_award_amount, prime_award_period_of_performance_start_date, prime_award_period_of_performance_current_end_date, prime_award_funding_agency_code, prime_awardee_uei, prime_awardee_name, prime_awardee_country_code, prime_awardee_business_types, prime_award_primary_place_of_performance_country_code, prime_award_base_transaction_description, subaward_type, subaward_amount, subaward_action_date_fiscal_year, subawardee_uei, subawardee_name, subawardee_country_code, subawardee_business_types, subaward_primary_place_of_performance_country_code, subaward_action_date, prime_award_base_action_date_fiscal_year) %>%
+  rename(
+    prime_award_piid = prime_award_fain,
+    prime_award_project_title = prime_award_base_transaction_description
+  ) -> asst
+
+sa_df <- rbind(cont, asst)
+```
+
+```{r}
+# Filter countries and date (Col, Gte, Mex, 2016 - 2022)
+countries <- c("MEX", "COL", "GTM")
+
+filtered_sa <- sa_df %>%
+  filter(prime_award_primary_place_of_performance_country_code %in% countries) %>%
+  mutate(cal_year = str_extract(subaward_action_date, "....$")) %>%
+  filter(cal_year %in% c(2016:2022))
+```
+
+```{r}
+# Deduplicate SA's
+filtered_sa %>%
+  janitor::get_dupes(subawardee_name, prime_award_piid, subaward_amount, subaward_action_date_fiscal_year) -> dupes ## list of dupes
+
+filtered_sa %>%
+  distinct(subawardee_name, prime_award_piid, subaward_amount, subaward_action_date_fiscal_year, .keep_all = T) %>%
+  mutate(prop_prime = subaward_amount / prime_award_amount) %>%
+  arrange(desc(prop_prime)) %>%
+  group_by(prime_award_piid) %>%
+  mutate(tot_prop = sum(prop_prime)) -> deduped_sa ## dedupe data
+
+deduped_sa %>%
+  filter(tot_prop <= 1) -> final_sa
+```
+
+```{r}
+# Check localization status.  Corresponds to sheet: Cleaned Subaward Data 9.12.24
+final_sa <- final_sa %>%
+  ungroup() %>%
+  mutate(local_indicator_prime = case_when(
+    prime_awardee_country_code == prime_award_primary_place_of_performance_country_code ~ "Local",
+    .default = "Not Local"
+  )) %>%
+   mutate(local_indicator_subawardee = case_when(
+    subawardee_country_code == prime_award_primary_place_of_performance_country_code ~ "Local",
+    .default = "Not Local"
+  )) 
+```
+
+```{r}
+# Create metrics 
+final_sa %>%
+  group_by(prime_award_piid) %>%
+  summarize(prime_name = max(prime_awardee_name),
+            country = max(prime_award_primary_place_of_performance_country_code),
+            name = max(prime_award_project_title),
+            tot_award = max(prime_award_amount),
+            loc_sa = sum(subaward_amount[local_indicator_subawardee == "Local"]),
+            tot_sa = sum(subaward_amount)) %>%
+  mutate(
+    prop_sa = tot_sa/tot_award,
+    prop_sa_local = loc_sa / tot_award,
+    lld_sa_indicator = loc_sa / tot_sa,
+  ) -> lld_assesment_df
+```
+
+```{r}
+# Create graph 
+final_sa %>%
+  filter(subaward_amount > 0) %>%
+  group_by(
+    cal_year, 
+    local_indicator_subawardee
+  ) %>%
+  summarize(subaward_amount = sum(subaward_amount)) %>%
+  pivot_wider(
+    names_from = local_indicator_subawardee, 
+    values_from = subaward_amount
+  ) %>%
+  mutate(loc_percentage = Local / (Local + `Not Local`)) %>%
+  pivot_longer(cols = c(Local, `Not Local`), names_to = "local_indicator_subawardee", values_to = "subaward_amount") %>%
+ggplot() +
+  geom_bar(
+    mapping = aes(
+      x = cal_year, 
+      y = subaward_amount, 
+      fill = fct_rev(as.factor(local_indicator_subawardee))), stat = "identity") +
+  ggthemes::theme_fivethirtyeight() +
+  scale_y_continuous(labels = scales::dollar_format()) +
+  labs(title = "Subaward Localization Data",
+       subtitle = "2016 - 2022: COL, GUAT, MEX",
+       caption = "Source: USASpending.gov | Data Pulled 9/11/2024",
+       fill = "Subaward Localization Status") 
+```
